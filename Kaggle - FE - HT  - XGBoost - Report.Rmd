@@ -1,0 +1,294 @@
+---
+title: "Kaggle - FE - HT  - XGBoost - report - Rocky Wang"
+output: html_document
+date: "2022-12-02"
+---
+#### Background
+
+For this competition, our goal is to build a solid model to predict the rating of a song. More
+specifically, the data set contains auditory features like loudness and tempo, as well as 
+performers' demographic information, which are all important factors for songs. Our key task is to pick the
+most powerful predictors and the most efficient model for the scenario.
+
+
+```{r load library}
+#load library
+
+library(tidyverse)
+library(caret)
+library(xgboost)
+library(qdapTools)
+```
+
+Load tidyverse for a set of useful packages, such as dplyr(data manipulation) and ggplots(data visualization)
+Load caret to streamline the process for creating predictive models
+Load xgboost for the powerful regression model
+Load qdapTools so 'mtabulate' function is viable
+
+```{r read/load data}
+#load data
+
+set.seed(1025)
+
+songs <- read.csv('analysisData.csv')
+scoringData <- read.csv('scoringData.csv')
+
+song <- songs[,-c(1,3)]
+scordata <- scoringData[,-c(1,3)]
+```
+
+To generate reproducible results, we set a seed for the entire scripts. Then CSV files were loaded into
+data frames. Since both id and song columns serve as unique identifiers which won't make any contribution 
+to our model, they are excluded from future 
+analysis.
+
+```{r feature engineering - genre}
+#feature engineering - genre
+
+song$genre <- gsub('\\[','',song$genre)
+song$genre <- gsub('\\]','',song$genre)
+song$genre <- gsub("\\'",'',song$genre)
+
+song$genre <- strsplit(song$genre,',')
+song <- cbind(song, mtabulate(song$genre))
+
+scordata$genre <- gsub('\\[','',scordata$genre)
+scordata$genre <- gsub('\\]','',scordata$genre)
+scordata$genre <- gsub("\\'",'',scordata$genre)
+
+scordata$genre <- strsplit(scordata$genre,',')
+scordata <- cbind(scordata, mtabulate(scordata$genre))
+
+shared_g <- intersect(names(song), names(scordata))
+
+scordata <- select(scordata,all_of(shared_g))
+song <- select(song,c('rating',all_of(shared_g)))
+
+```
+
+Genre column seems to contains a lot of information, to make this feature usable, we need
+to engineer a little bit. The original genre contains special characters ([,],'), we
+firstly delete them by replacing these character with blank string. Then everything left
+that separates genre names is the comma, we use string split function and set "," as the 
+delimiter. After perform this action on both data sets, we noticed there are many more
+genre names extract from song data than scordata. Since our ultimate goal is to develop a
+model that predict the rating of songs from scordata, it is logical for us to only include
+anything appears in both data sets as our predictors. We find come genre names and exclude the rest.
+
+```{r}
+#Sample results for engineered genre
+
+knitr::include_graphics("Adjusted genre.png")
+```
+
+
+```{r feature engineering - performer}
+#feature engineering - performer
+
+song$performer <- strsplit(song$performer,' ')
+song <- cbind(song, mtabulate(song$performer))
+
+scordata$performer <- strsplit(scordata$performer,' ')
+scordata <- cbind(scordata, mtabulate(scordata$performer))
+
+shared_p <- intersect(names(song), names(scordata))
+
+scordata <- select(scordata,all_of(shared_p))
+song <- select(song,c('rating',all_of(shared_p)))
+
+```
+
+Using space as a delimiter to separate performers' name and make each unique elements
+(first name/last name/special characters) as a column. Again, we only want to include 
+common elements that appear in both data sets. Find the intersection and exclude the rest
+from both data frame.
+
+PS : One thing that I could have done better is to further exclude special characters 
+like $, % or '. Most of them are used to decorate pseudonyms, though it might provide
+minimal contribution on the ratings, considering the large pool of names from performers,
+I think they are neglectable.
+
+
+```{r feature engineering - track_explicit}
+#feature engineering - track_explicit
+
+scordata$track_explicit <- as.numeric(scordata$track_explicit)
+song$track_explicit <- as.numeric(song$track_explicit)
+
+```
+
+Track_explicit is a categorical variable, we convert it to a dummy binary variable
+
+```{r split into training and testing dataset}
+#split into training and testing data set
+
+song <- song[,-c(2,3)]
+scordata <- scordata[,-c(1,2)]
+
+parts <- createDataPartition(song$rating, p = .8, list = F)
+train <- song[parts, ]
+test <- song[-parts, ]
+```
+
+To finalize both data frames, we delete the original genre and performer columns
+from the data sets. Though for this competition the while 'analysisData.csv' serves 
+as the training set, I decided to divide it further so I can test the performance
+of my model before submitting. One possible benefit could be the prevention of
+over fitting.
+
+```{r define predictor and response variables}
+#define predictor and response variables
+
+train_x <- data.matrix(train[, -1])
+train_y <- train[,'rating']
+
+test_x <- data.matrix(test[, -1])
+test_y <- test[, 'rating']
+```
+
+For this model, 'rating' is our target variable and everything else serves as 
+predictors. Since XGBoost only take certain format for input data, we convert 
+predictors portion into  data matrix.
+
+
+
+#### Model - RGBoost Regression
+
+In this section, my first pale try was using neural network(attached separately), however, with the fact
+that neural network performs better with images and texts, this was not a convincing choice. And when it 
+comes to the traditional regression models, XGBoost regression is one of the most powerful models I know, 
+so I headed that way. Still, the result of neural network using the original data did generate a good 
+RMSE, therefore, I dig deeper into the part of feature engineering before applying the XGBoost regression. 
+
+```{r hyper parameter grid}
+#hyper parameter grid
+
+hyper_grid <- expand.grid(
+  eta = 0.01,
+  max_depth = c(3,6), 
+  min_child_weight = c(1,3,5),
+  subsample = c(0.2,0.5,0.8), 
+  colsample_bytree = c(0.2,0.5,0.8),
+  gamma = c(0, 1, 10),
+  lambda = c(0, 1e-2, 0.1, 1, 100),
+  alpha = c(0, 1e-2, 0.1, 1, 100),
+  rmse = 0,          # a place to dump RMSE results
+  trees = 0          # a place to dump required number of trees
+)
+```
+
+The hyper parameter grid enables us to fill in any values we want to test for each
+parameter, still, the assign of value should be a reasonable try for each particular
+parameter. For example, subsample ranges from 0 to 1, gamma ranges from 0 to infinite.
+Also, we leave rmse and trees as blank for now since we will grab these from the iteration
+that output the lowest RMSE.
+
+```{r grid search, eval=FALSE, include=FALSE}
+#grid search
+
+for(i in seq_len(nrow(hyper_grid))) 
+  { m <- xgb.cv(
+    data = train_x,
+    label = train_y,
+    nrounds = 6000,
+    objective = "reg:squarederror",
+    early_stopping_rounds = 50, 
+    nfold = 10,
+    verbose = 0,
+    params = list( 
+      eta = hyper_grid$eta[i], 
+      max_depth = hyper_grid$max_depth[i],
+      min_child_weight = hyper_grid$min_child_weight[i],
+      subsample = hyper_grid$subsample[i],
+      colsample_bytree = hyper_grid$colsample_bytree[i],
+      gamma = hyper_grid$gamma[i], 
+      lambda = hyper_grid$lambda[i], 
+      alpha = hyper_grid$alpha[i]
+    ) 
+  )
+  hyper_grid$rmse[i] <- min(m$evaluation_log$test_rmse_mean)
+  hyper_grid$trees[i] <- m$best_iteration}
+```
+
+Creating a for loop that will take all the values from hyper parameter grid into the
+XGBoost regression model. Like mention in the last paragraph, RMSE and trees are retrieved form the
+iteration generating the smallest RMSE. Since the tuning process will take 6 to 9 hours, I decide to not 
+run it in the R markdown file, instead, I will attach a sample results that I got earlier.
+
+
+```{r}
+#Sample results for grid research
+
+knitr::include_graphics("Grid.png")
+```
+
+
+```{r results}
+#results
+
+hyper_grid %>%
+  filter(rmse > 0) %>%
+  arrange(rmse) %>%
+  glimpse()
+```
+
+Display the results of the all testing results. Though we are only curious about the parameter that
+generate the lowest REMSE, view the table in a whole can potentially provide insights on how each parameter
+would affect the prediction results.
+
+```{r optimal parameter list}
+#optimal parameter list
+
+params <- list(
+  eta = 0.01,
+  max_depth = 3,
+  min_child_weight = 3,
+  subsample = 0.5,
+  colsample_bytree = 0.5,
+  gamma=0,
+  lambda=1e+00,
+  alpha=0)
+
+```
+
+Assign optimal parameters which generate the lowers RMSE.
+
+```{r train final model}
+#train final model
+
+xgb.fit.final <- xgboost(
+  params = params,
+  data = as.matrix(train_x),
+  label = train_y,
+  nrounds = 3147,
+  objective = "reg:squarederror",
+  verbose = 0)
+```
+
+Use the optimal parameters to train the model.
+
+```{r check performance with test set}
+#check performance with test set
+
+pred_t <- predict(xgb.fit.final, test_x)
+head(pred_t, n=47)
+
+RMSE <- sqrt(mean((test_y - pred_t)^2))
+RMSE
+
+```
+
+As mentioned at the beginning, I split train set and test test from 'analysisData.csv' so I can evaluate 
+the performance of my model before turning in the results. However, this step only serves as a guideline, there are cases I get a high RMSE when testing using test_y but get a much lower RMSE when uploading to
+Kaggle.
+
+```{r save prediction results}
+#save prediction results
+
+pred <- predict(xgb.fit.final,newdata=as.matrix(scordata))
+
+submissionFile = data.frame(id = scoringData$id, rating = pred)
+write.csv(submissionFile, 'sample_submission_XGBoost.csv',row.names = F)
+```
+
+Save the final prediction results into the designated file and upload to Kaggle.
